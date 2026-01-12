@@ -1,0 +1,145 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+model contract {
+  id             Int       @id @default(autoincrement())
+  clientId       Int
+  unitId         Int
+  totalAmount    Int
+  downpaymentPct Int
+  startDate      DateTime
+  months         Int       @default(48)
+  createdAt      DateTime  @default(now())
+  bookingDate    DateTime?
+  downPayment    Int?
+  status         String?
+  possession     Int?
+
+  user user @relation(fields: [clientId], references: [id], map: "Contract_clientId_fkey")
+  unit unit @relation(fields: [unitId], references: [id], map: "Contract_unitId_fkey")
+
+  installmentschedule installmentschedule[]
+  ledgerrow           ledgerrow[]
+
+  @@index([clientId], map: "Contract_clientId_fkey")
+  @@index([unitId], map: "Contract_unitId_fkey")
+}
+
+model installmentschedule {
+  id                Int      @id @default(autoincrement())
+  contractId        Int
+  srNo              Int
+  title             String
+  dueDate           DateTime
+  installmentAmount Int
+  createdAt         DateTime @default(now())
+
+  contract contract  @relation(fields: [contractId], references: [id], map: "InstallmentSchedule_contractId_fkey")
+  payment  payment[]
+
+  @@index([contractId], map: "InstallmentSchedule_contractId_fkey")
+}
+
+model ledgerrow {
+  id                Int       @id @default(autoincrement())
+  contractId        Int
+  srNo              Int
+  description       String
+  installmentAmount Int
+  dueDate           DateTime
+  amountPaid        Int       @default(0)
+  paymentDate       DateTime?
+  paymentProof      String?
+
+  // ✅ NEW FIELDS (for instrument)
+  instrumentType String?
+  instrumentNo   String?
+
+  // ✅ IMPORTANT: keep DB columns so Prisma does NOT try to drop them
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  contract contract @relation(fields: [contractId], references: [id], onDelete: Cascade)
+
+  // ✅ CHILD ROWS RELATION
+  children ledgerchildrow[]
+
+  @@unique([contractId, srNo], map: "contractId_srNo")
+  @@index([contractId], map: "ledgerrow_contractId_idx")
+}
+
+model ledgerchildrow {
+  id          Int       @id @default(autoincrement())
+  ledgerRowId Int
+  lineNo      Int
+
+  description     String
+  amountPaid      Int       @default(0)
+  paymentDate     DateTime?
+  paymentProof    String?
+  instrumentType  String?
+  instrumentNo    String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  ledgerrow ledgerrow @relation(fields: [ledgerRowId], references: [id], onDelete: Cascade)
+
+  @@unique([ledgerRowId, lineNo], map: "ledgerChild_ledgerRowId_lineNo")
+  @@index([ledgerRowId], map: "ledgerChild_ledgerRowId_idx")
+}
+
+
+model payment {
+  id          Int      @id @default(autoincrement())
+  scheduleId  Int
+  paidAmount  Int
+  paymentDate DateTime
+  proofUrl    String?
+  referenceNo String?
+  notes       String?
+  createdById Int
+  createdAt   DateTime @default(now())
+
+  user                user                @relation(fields: [createdById], references: [id], map: "Payment_createdById_fkey")
+  installmentschedule installmentschedule @relation(fields: [scheduleId], references: [id], map: "Payment_scheduleId_fkey")
+
+  @@index([createdById], map: "Payment_createdById_fkey")
+  @@index([scheduleId], map: "Payment_scheduleId_fkey")
+}
+
+model unit {
+  id         Int      @id @default(autoincrement())
+  project    String
+  unitNumber String
+  unitSize   Int
+  createdAt  DateTime @default(now())
+  unitType   String?
+
+  contract contract[]
+}
+
+model user {
+  id           Int       @id @default(autoincrement())
+  name         String
+  email        String    @unique(map: "User_email_key")
+  passwordHash String
+  role         user_role @default(CLIENT)
+  createdAt    DateTime  @default(now())
+  cnic         String?
+  phone        String?
+
+  contract contract[]
+  payment  payment[]
+}
+
+enum user_role {
+  CLIENT
+  ACQUISITION
+}
