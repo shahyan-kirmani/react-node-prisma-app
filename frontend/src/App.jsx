@@ -2,12 +2,13 @@ import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { useMemo, useState } from "react";
 import { getAuth, clearAuth } from "./auth";
 
-import Login from "./pages/Login";
-import AdminDashboard from "./pages/AdminDashboard";
-import AdminClients from "./pages/AdminClients";
-import AdminLedger from "./pages/AdminLedger";
+import Login from "./Pages/Login";
+import Register from "./Pages/register";
 
-import ClientDashboard from "./pages/ClientDashboard";
+import AdminDashboard from "./Pages/AdminDashboard";
+import AdminClients from "./Pages/AdminClients";
+import AdminLedger from "./Pages/AdminLedger";
+import ClientDashboard from "./Pages/ClientDashboard";
 
 function Protected({ session, allow, children }) {
   if (!session.token || !session.user) return <Navigate to="/login" replace />;
@@ -34,6 +35,7 @@ export default function App() {
         <Route path="/" element={<Navigate to="/login" replace />} />
 
         <Route path="/login" element={<Login setSession={setSession} />} />
+        <Route path="/register" element={<Register setSession={setSession} />} />
 
         {/* ---------------- ADMIN ROUTES ---------------- */}
         <Route
@@ -62,7 +64,6 @@ export default function App() {
           }
         />
 
-        {/* ✅ LEDGER PAGE (ADMIN) */}
         <Route
           path="/admin/ledger/:contractId"
           element={

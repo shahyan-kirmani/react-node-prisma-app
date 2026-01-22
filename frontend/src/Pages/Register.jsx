@@ -6,45 +6,66 @@ import { setAuth } from "../auth";
 import logo from "../assets/images/developmentlogo.png";
 import sideImage from "../assets/images/Avenue18.jpg";
 
-export default function Login({ setSession }) {
+export default function Register({ setSession }) {
   const navigate = useNavigate();
 
   const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:5050";
 
+  const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [loading, setLoading] = useState(false);
 
-  const handleSubmit = async (e) => {
+  // ✅ Role dropdown state
+  const [role, setRole] = useState("CLIENT");
+
+  // ✅ Admin / Acquisition code (only required for ACQUISITION)
+  const [adminCode, setAdminCode] = useState("");
+
+  const handleRegister = async (e) => {
     e.preventDefault();
 
-    if (!email || !password) {
-      alert("Please enter email and password");
+    if (!name || !email || !password) {
+      alert("Please fill all fields");
+      return;
+    }
+
+    // ✅ If Acquisition selected, code required
+    if (role === "ACQUISITION" && !adminCode.trim()) {
+      alert("Please enter Acquisition code");
       return;
     }
 
     try {
-      setLoading(true);
+      const payload = {
+        name,
+        email,
+        password,
+        role,
+        // ✅ send adminCode only when role is ACQUISITION
+        ...(role === "ACQUISITION" ? { adminCode: adminCode.trim() } : {}),
+      };
 
-      const res = await fetch(`${API_BASE}/api/auth/login`, {
+      const res = await fetch(`${API_BASE}/api/auth/register`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, password }),
+        body: JSON.stringify(payload),
       });
 
       const data = await res.json().catch(() => ({}));
 
+      // ✅ Handle backend errors safely
       if (!res.ok) {
-        alert(data.message || data.error || "Login failed");
+        alert(data.message || data.error || "Register failed");
         return;
       }
 
+      // ✅ Must have token + user
       if (!data.token || !data.user) {
-        alert("Login response missing token/user");
+        alert("Register response missing token/user");
         return;
       }
 
-      // ✅ Save real token+user
+      // ✅ Save session
       setAuth(data.token, data.user);
       setSession({ token: data.token, user: data.user });
 
@@ -52,28 +73,34 @@ export default function Login({ setSession }) {
       if (data.user.role === "ACQUISITION") navigate("/admin");
       else navigate("/client");
     } catch (err) {
-      alert("Backend not reachable. Is it running on port 5050?");
-    } finally {
-      setLoading(false);
+      alert("Backend not reachable. Is it running on 5050?");
     }
   };
 
   return (
     <div style={styles.page}>
-      <div style={styles.card} className="login-card-grid">
+      <div style={styles.card} className="register-card-grid">
         {/* LEFT */}
-        <div style={styles.left} className="login-left">
+        <div style={styles.left} className="register-left">
           <img src={logo} alt="Makkaan Developments" style={styles.logo} />
 
-          <h1 style={styles.title} className="login-title">
-            Welcome Back
+          <h1 style={styles.title} className="register-title">
+            Create Account
           </h1>
 
-          <p style={styles.subtitle}>
-            Login to manage your real estate operations
-          </p>
+          <p style={styles.subtitle}>Register to access the portal</p>
 
-          <form onSubmit={handleSubmit} style={styles.form}>
+          <form onSubmit={handleRegister} style={styles.form}>
+            <label style={styles.label}>Full Name</label>
+            <input
+              type="text"
+              placeholder="Your name"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              style={styles.input}
+              autoComplete="name"
+            />
+
             <label style={styles.label}>Email Address</label>
             <input
               type="email"
@@ -91,17 +118,55 @@ export default function Login({ setSession }) {
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               style={styles.input}
-              autoComplete="current-password"
+              autoComplete="new-password"
             />
 
-            <button type="submit" style={styles.button} disabled={loading}>
-              {loading ? "Logging in..." : "Login"}
+            {/* ✅ Role dropdown */}
+            <label style={styles.label}>Role</label>
+            <select
+              value={role}
+              onChange={(e) => {
+                const v = e.target.value;
+                setRole(v);
+                // optional: clear code when switching away
+                if (v !== "ACQUISITION") setAdminCode("");
+              }}
+              style={styles.input}
+            >
+              <option value="CLIENT">CLIENT</option>
+              <option value="ACQUISITION">ACQUISITION</option>
+            </select>
+
+            {/* ✅ Only show when ACQUISITION selected */}
+            {role === "ACQUISITION" && (
+              <>
+                <label style={styles.label}>Acquisition Code</label>
+                <input
+                  type="password"
+                  placeholder="Enter acquisition/admin code"
+                  value={adminCode}
+                  onChange={(e) => setAdminCode(e.target.value)}
+                  style={styles.input}
+                  autoComplete="off"
+                />
+              </>
+            )}
+
+            <button type="submit" style={styles.button}>
+              Register
             </button>
 
-            <div style={styles.createRow}>
-              <span style={styles.createText}>New here?</span>
-              <Link to="/register" style={styles.createLink}>
-                Create account
+            <div style={{ marginTop: "14px", fontSize: "13px" }}>
+              <span style={{ color: "#64748b" }}>Already have an account?</span>{" "}
+              <Link
+                to="/login"
+                style={{
+                  color: "#2563eb",
+                  fontWeight: "700",
+                  textDecoration: "none",
+                }}
+              >
+                Login
               </Link>
             </div>
 
@@ -111,8 +176,8 @@ export default function Login({ setSession }) {
           </form>
         </div>
 
-        {/* RIGHT */}
-        <div style={styles.right} className="login-right">
+        {/* RIGHT - background image */}
+        <div style={styles.right} className="register-right">
           <div style={styles.rightOverlay} />
         </div>
       </div>
@@ -120,19 +185,19 @@ export default function Login({ setSession }) {
       {/* ✅ Mobile responsiveness */}
       <style>{`
         @media (max-width: 900px){
-          .login-card-grid{
+          .register-card-grid{
             grid-template-columns: 1fr !important;
             min-height: auto !important;
           }
-          .login-right{
+          .register-right{
             order: -1;
-            min-height: 260px !important;
+            min-height: 240px !important;
             border-radius: 22px 22px 0 0 !important;
           }
-          .login-left{
+          .register-left{
             padding: 26px 20px 28px !important;
           }
-          .login-title{
+          .register-title{
             font-size: 28px !important;
           }
         }
@@ -152,8 +217,7 @@ const styles = {
     padding: "18px",
     background:
       "radial-gradient(1200px 600px at 20% 10%, #eef3ff 0%, #f5f7ff 35%, #eef2ff 100%)",
-    fontFamily:
-      "system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif",
+    fontFamily: "system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif",
   },
 
   card: {
@@ -214,6 +278,7 @@ const styles = {
     borderRadius: "12px",
     fontSize: "14px",
     outline: "none",
+    backgroundColor: "#fff",
   },
 
   button: {
@@ -227,26 +292,6 @@ const styles = {
     fontSize: "15px",
     cursor: "pointer",
     marginTop: "6px",
-    opacity: 1,
-  },
-
-  createRow: {
-    marginTop: "14px",
-    display: "flex",
-    gap: "8px",
-    alignItems: "center",
-  },
-
-  createText: {
-    color: "#64748b",
-    fontSize: "13px",
-  },
-
-  createLink: {
-    color: "#2563eb",
-    fontWeight: "700",
-    fontSize: "13px",
-    textDecoration: "none",
   },
 
   footer: {
@@ -268,6 +313,6 @@ const styles = {
     position: "absolute",
     inset: 0,
     background:
-      "linear-gradient(135deg, rgba(59,130,246,0.20), rgba(109,40,217,0.45))",
+      "linear-gradient(135deg, rgba(15,23,42,0.15), rgba(109,40,217,0.35))",
   },
 };

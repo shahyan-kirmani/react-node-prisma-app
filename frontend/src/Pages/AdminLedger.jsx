@@ -3,6 +3,7 @@ import { useNavigate, useParams } from "react-router-dom";
 import SidebarLayout from "../layout/SidebarLayout";
 import { api } from "../api";
 
+
 // ✅ Drag & Drop libs
 import { DndContext, closestCenter } from "@dnd-kit/core";
 import {
@@ -78,29 +79,53 @@ function lateDays(dueDate, paymentDate) {
   return Math.max(0, diffDays);
 }
 
-// ✅ Surcharge should still show even if balance is 0 (paid late)
-function calcSurchargeOnBalance({
-  installmentAmount,
-  amountPaid,
-  dueDate,
-  paymentDate,
-}) {
-  const inst = Number(installmentAmount || 0);
-  const paid = Number(amountPaid || 0);
+// ✅ Late days = (paymentDate if exists else todayPK) - dueDate
 
-  const balance = Math.max(0, inst - paid);
 
-  // if balance > 0 => surcharge on balance
-  // if balance == 0 but paid > 0 => surcharge on installmentAmount
-  const effectiveBase = balance > 0 ? balance : paid > 0 ? inst : 0;
-
-  const days = lateDays(dueDate, paymentDate);
-
-  if (effectiveBase <= 0) return 0;
-  if (days < SURCHARGE_AFTER_DAYS) return 0;
-
-  return Math.round((SURCHARGE_PCT / 100) * effectiveBase);
+// ✅ If balance is still pending, keep counting late days till TODAY.
+// If fully paid, stop counting at the latest payment date.
+// ✅ Always count late days till TODAY (so next 30-day cycle can add again)
+// Locked surcharge will never decrease anyway.
+// ✅ Late days ONLY when payment date exists (first surcharge requires both dates)
+function lateDaysWhenPaid(dueDate, paymentDate) {
+  if (!dueDate) return 0;
+  // ✅ if payment date missing, still count till TODAY
+  return lateDays(dueDate, paymentDate || "");
 }
+
+
+
+
+// ✅ surcharge cycles count: 0-29 =>0, 30-59=>1, 60-89=>2 ...
+
+
+// ✅ surcharge cycles count: 0-29 =>0, 30-59=>1, 60-89=>2 ...
+function cyclesFromLateDays(days) {
+  return Math.floor(Math.max(0, Number(days || 0)) / SURCHARGE_AFTER_DAYS);
+}
+
+function sumBlocks(blocks) {
+  return (blocks || []).reduce((s, b) => s + Number(b.amount || 0), 0);
+}
+
+function splitLateDays(days) {
+  const fullCycles = Math.floor(Math.max(0, days) / SURCHARGE_AFTER_DAYS);
+  const rem = Math.max(0, days) % SURCHARGE_AFTER_DAYS;
+  return { fullCycles, rem };
+}
+
+function makeBlock({ cycle, balance }) {
+  const amount = balance > 0 ? Math.round((SURCHARGE_PCT / 100) * balance) : 0;
+  return {
+    cycle,
+    daysFrom: (cycle - 1) * SURCHARGE_AFTER_DAYS + 1,
+    daysTo: cycle * SURCHARGE_AFTER_DAYS,
+    amount,
+    balanceAtLock: Math.round(balance),
+    lockedAt: new Date().toISOString().slice(0, 10),
+  };
+}
+
 
 function ordinal(n) {
   const s = ["th", "st", "nd", "rd"],
@@ -135,6 +160,107 @@ function effectivePaymentDate(row) {
   return dates[dates.length - 1];
 }
 
+// ✅ Balance display rule you want:
+// - Before any payment => 0
+// - After any payment => show remaining
+function displayBalanceForRow(row) {
+  const inst = Number(row?.installmentAmount || 0);
+  const paid = effectivePaid(row); // parent + children
+  const remaining = Math.max(0, inst - paid);
+
+  return paid > 0 ? remaining : 0;
+}
+
+
+function computeRowSurchargeDisplay(row) {
+  const inst = Number(row.installmentAmount || 0);
+
+  // ✅ cycles depend on latest payment date (preview ok)
+  const payDate = effectivePaymentDate(row);
+  const daysLate = lateDaysWhenPaid(row.dueDate, payDate);
+  const previewCycles = cyclesFromLateDays(daysLate);
+
+  // ✅ base snapshot from DB / last save
+  const baseCycles = Number(row.surchargeCyclesBase || 0);
+  const baseLocked = Number(row.surchargeLockedBase || 0);
+
+  // ✅ THIS is the key:
+  // after first cycle, surcharge should be calculated on SAVED BALANCE, not the balance you just typed.
+  const savedBalance = Number(
+    row.surchargeBalanceBase ?? inst
+  );
+
+  const extraCycles = Math.max(0, previewCycles - baseCycles);
+
+  // ✅ per-cycle base amount rule:
+  // - cycle #1 => installment amount
+  // - cycle #2+ => saved balance snapshot
+  let previewAdd = 0;
+  if (extraCycles > 0) {
+    const hasSavedPayment = savedBalance < inst;
+
+for (let c = baseCycles + 1; c <= previewCycles; c++) {
+  const baseForThisCycle =
+    !hasSavedPayment ? inst : c === 1 ? inst : savedBalance;
+
+  previewAdd += baseForThisCycle > 0
+    ? Math.round((SURCHARGE_PCT / 100) * baseForThisCycle)
+    : 0;
+}
+
+  }
+
+  return {
+    daysLate,
+    cycles: previewCycles,
+    surcharge: baseLocked + previewAdd,
+    baseLocked,
+    previewAdd,
+  };
+}
+
+
+function computePossessionSurchargeDisplay({
+  possessionAmount,
+  posPaid,
+  posDueDate,
+  posPaymentDate,
+  posSurchargeLockedAmountBase,
+  posSurchargeCyclesBase,
+}) {
+  const inst = Number(possessionAmount || 0);
+  const paidAll = Number(posPaid || 0);
+
+  // ✅ Balance display rule (same as your installment rule):
+  // - before any payment => 0
+  // - after some payment => show remaining
+  const balance = paidAll > 0 ? Math.max(0, inst - paidAll) : 0;
+
+  const daysLate = lateDaysWhenPaid(posDueDate, posPaymentDate);
+  const previewCycles = cyclesFromLateDays(daysLate);
+
+  const baseLocked = Number(posSurchargeLockedAmountBase || 0);
+  const baseCycles = Number(posSurchargeCyclesBase || 0);
+
+  const extraCycles = Math.max(0, previewCycles - baseCycles);
+
+  const previewAdd =
+    extraCycles > 0 && balance > 0
+      ? Math.round((SURCHARGE_PCT / 100) * balance) * extraCycles
+      : 0;
+
+  return {
+    daysLate,
+    cycles: previewCycles,
+    surcharge: baseLocked + previewAdd,
+    baseLocked,
+    previewAdd,
+    balance,
+  };
+}
+
+
+
 function Input(props) {
   return (
     <input
@@ -146,7 +272,7 @@ function Input(props) {
         border: "1px solid #e5e7eb",
         outline: "none",
         background: props.disabled ? "#f1f5f9" : "#ffffff",
-        boxShadow: "0 1px 0 rgba(2,6,23,0.04)",
+        boxShadow: "0 1px 0 rgba(2, 6, 23, 0.04)",
         transition: "150ms ease",
         fontFamily: "Poppins, sans-serif",
         fontSize: 13,
@@ -167,7 +293,7 @@ function Select(props) {
         border: "1px solid #e5e7eb",
         outline: "none",
         background: props.disabled ? "#f1f5f9" : "#ffffff",
-        boxShadow: "0 1px 0 rgba(2,6,23,0.04)",
+        boxShadow: "0 1px 0 rgba(2, 6, 23, 0.04)",
         transition: "150ms ease",
         fontFamily: "Poppins, sans-serif",
         fontSize: 13,
@@ -222,7 +348,7 @@ function PrimaryButton({ children, ...props }) {
         color: "white",
         fontWeight: 900,
         cursor: "pointer",
-        boxShadow: "0 10px 20px rgba(37,99,235,0.18)",
+        boxShadow: "0 10px 20px rgba(37, 99, 235, 0.18)",
         transition: "150ms ease",
         fontFamily: "Poppins, sans-serif",
         ...props.style,
@@ -295,7 +421,7 @@ function SortableRow({ row, children }) {
     transform: CSS.Transform.toString(transform),
     transition,
     background: isDragging ? "#eef2ff" : "transparent",
-    boxShadow: isDragging ? "0 12px 26px rgba(2,6,23,0.12)" : "none",
+    boxShadow: isDragging ? "0 12px 26px rgba(2, 6, 23, 0.12)" : "none",
   };
 
   return (
@@ -334,6 +460,8 @@ function SortableRow({ row, children }) {
 export default function AdminLedger({ token, user, onLogout }) {
   const nav = useNavigate();
   const { contractId } = useParams();
+  console.log("contractId from URL:", contractId);
+
   const client = useMemo(() => api(token), [token]);
 
   const [loading, setLoading] = useState(true);
@@ -341,7 +469,6 @@ export default function AdminLedger({ token, user, onLogout }) {
   const [msg, setMsg] = useState("");
 
   const [downloadingPdf, setDownloadingPdf] = useState(false);
-  // const [downloadingExcel, setDownloadingExcel] = useState(false);
 
   const [contract, setContract] = useState(null);
   const [rows, setRows] = useState([]);
@@ -354,6 +481,21 @@ export default function AdminLedger({ token, user, onLogout }) {
   const [possessionPctEdit, setPossessionPctEdit] = useState(0);
   const [monthsEdit, setMonthsEdit] = useState(0);
 
+  // ✅ POSSESSION editable fields (now it behaves like a real row)
+  const [posDueDate, setPosDueDate] = useState("");
+  const [posPaid, setPosPaid] = useState(0);
+  const [posPaymentDate, setPosPaymentDate] = useState("");
+  const [posInstrumentType, setPosInstrumentType] = useState("");
+  const [posInstrumentNo, setPosInstrumentNo] = useState("");
+  const [posPaymentProof, setPosPaymentProof] = useState("");
+  const [posSurchargeLockedAmount, setPosSurchargeLockedAmount] = useState(0);
+  const [posSurchargeLockedBase, setPosSurchargeLockedBase] = useState(0);
+const [posSurchargeCyclesBase, setPosSurchargeCyclesBase] = useState(0);
+
+  const [posSurchargeCyclesApplied, setPosSurchargeCyclesApplied] = useState(0);
+  const [posSurchargeBlocks, setPosSurchargeBlocks] = useState([]);
+
+
   const didInitEdits = useRef(false);
 
   // ✅ Draggable Possession row key + order
@@ -361,21 +503,41 @@ export default function AdminLedger({ token, user, onLogout }) {
   const [rowOrder, setRowOrder] = useState([]);
 
   function withKeys(list) {
-    return (list || []).map((r) => ({
+  return (list || []).map((r) => {
+    const lockedFromDb = Number(
+      r.latePaymentSurcharge ?? r.LatePaymentSurcharge ?? 0
+    );
+
+    return {
       ...r,
       __key:
         r.__key ||
         (r.id ? `id-${r.id}` : `tmp-${crypto.randomUUID?.() || Date.now()}`),
-      children: (r.children || []).map((c) => ({
-        ...c,
-        __ckey:
-          c.__ckey ||
-          (c.id
-            ? `cid-${c.id}`
-            : `ctmp-${crypto.randomUUID?.() || Date.now()}`),
-      })),
-    }));
-  }
+
+      // ✅ ALWAYS keep locked surcharge from DB
+      surchargeLockedAmount: Number(r.surchargeLockedAmount || lockedFromDb || 0),
+      surchargeCyclesApplied: Number(r.surchargeCyclesApplied || 0),
+      surchargeLockedAt: r.surchargeLockedAt || null,
+
+      // ✅ base (saved) snapshot — Save se pehle yahi fixed rahega
+surchargeLockedBase: Number(r.surchargeLockedAmount || lockedFromDb || 0),
+surchargeCyclesBase: Number(r.surchargeCyclesApplied || 0),
+
+
+
+// ✅ saved balance snapshot (used for next cycles after first)
+surchargeBalanceBase: Number(
+  r.surchargeBalanceBase ??
+  Math.max(0, Number(r.installmentAmount || 0) - effectivePaid(r))
+),
+
+      // ✅ keep blocks safe
+      surchargeBlocks: Array.isArray(r.surchargeBlocks) ? r.surchargeBlocks : [],
+
+      
+    };
+  });
+}
 
   async function load() {
     setLoading(true);
@@ -392,6 +554,23 @@ export default function AdminLedger({ token, user, onLogout }) {
       setDownPaymentEdit(Number(c?.downPayment || 0));
       setPossessionPctEdit(Number(c?.possession || 0));
       setMonthsEdit(Number(c?.months || 0));
+
+      // ✅ init POSSESSION fields (if backend returns them; else safe defaults)
+      setPosDueDate(c?.possessionDueDate ? String(c.possessionDueDate).slice(0, 10) : "");
+      setPosPaid(Number(c?.possessionPaid || 0));
+      setPosPaymentDate(c?.possessionPaymentDate ? String(c.possessionPaymentDate).slice(0, 10) : "");
+      setPosInstrumentType(c?.possessionInstrumentType || "");
+      setPosInstrumentNo(c?.possessionInstrumentNo || "");
+      setPosPaymentProof(c?.possessionPaymentProof || "");
+      setPosSurchargeLockedAmount(Number(c?.possessionSurchargeLockedAmount || 0));
+      setPosSurchargeCyclesApplied(Number(c?.possessionSurchargeCyclesApplied || 0));
+      setPosSurchargeLockedBase(Number(c?.possessionSurchargeLockedAmount || 0));
+setPosSurchargeCyclesBase(Number(c?.possessionSurchargeCyclesApplied || 0));
+
+      setPosSurchargeBlocks(
+  Array.isArray(c?.possessionSurchargeBlocks) ? c.possessionSurchargeBlocks : []
+);
+
 
       // ✅ init order (rows + possession if enabled)
       const baseKeys = (r || []).map((x) => x.__key);
@@ -413,6 +592,15 @@ export default function AdminLedger({ token, user, onLogout }) {
     // eslint-disable-next-line
   }, [contractId]);
 
+  // ---------- AUTO CALCULATIONS ----------
+  const totalAmount = Number(totalAmountEdit || 0);
+  const downPayment = Number(downPaymentEdit || 0);
+  const months = Number(monthsEdit || 0);
+  const possessionPct = Number(possessionPctEdit || 0);
+
+  const possessionAmount = Math.round((totalAmount * possessionPct) / 100);
+  const monthlyTotal = Math.max(0, totalAmount - downPayment - possessionAmount);
+
   // ✅ Keep rowOrder synced with rows + possession toggle
   useEffect(() => {
     setRowOrder((prev) => {
@@ -427,7 +615,7 @@ export default function AdminLedger({ token, user, onLogout }) {
       }
 
       // possession key add/remove
-      if (possessionPct > 0) {
+      if (possessionPctEdit > 0) {
         if (!next.includes(POS_KEY)) next.push(POS_KEY);
       } else {
         next = next.filter((k) => k !== POS_KEY);
@@ -436,6 +624,106 @@ export default function AdminLedger({ token, user, onLogout }) {
       return next;
     });
   }, [rows, possessionPctEdit]);
+
+  // ✅✅ 30-DAY SURCHARGE ACCUMULATOR FOR INSTALLMENT ROWS
+  // Every time late days cross another 30-day block, add NEW surcharge:
+  // previousLocked + (5% of CURRENT balance) * (newCycles)
+  // ✅✅ 30-DAY SURCHARGE ACCUMULATOR FOR INSTALLMENT ROWS
+// Rule:
+// - First surcharge ONLY after BOTH DueDate + PaymentDate exist.
+// - Late days = DueDate -> LatestPaymentDate (parent/child)
+// - Each 30-day boundary adds 5% of CURRENT balance (after payments)
+// useEffect(() => {
+//   setRows((prev) => {
+//     let changed = false;
+
+//     const next = prev.map((r) => {
+//       const inst = Number(r.installmentAmount || 0);
+//       if (inst <= 0) return r;
+
+//       // ✅ Paid includes parent + children
+//       const paid = effectivePaid(r);
+//       const balance = Math.max(0, inst - paid);
+
+//       // ✅ latest payment date among parent + child
+//       const payDate = effectivePaymentDate(r);
+
+//       // ✅ IMPORTANT: if no payment date => no surcharge at all
+//       const daysLate = lateDaysWhenPaid(r.dueDate, payDate);
+//       const shouldHaveCycles = cyclesFromLateDays(daysLate);
+
+//       const applied = Number(r.surchargeCyclesApplied || 0);
+//       if (shouldHaveCycles <= applied) return r;
+
+//       const prevLocked = Number(r.surchargeLockedAmount || 0);
+//       const cyclesToAdd = shouldHaveCycles - applied;
+
+//       let add = 0;
+//       for (let i = 0; i < cyclesToAdd; i++) {
+//         add += balance > 0 ? Math.round((SURCHARGE_PCT / 100) * balance) : 0;
+//       }
+
+//       changed = true;
+//       return {
+//         ...r,
+//         surchargeLockedAmount: prevLocked + add,
+//         surchargeCyclesApplied: shouldHaveCycles,
+//         surchargeLockedAt: new Date().toISOString().slice(0, 10),
+//       };
+//     });
+
+//     return changed ? next : prev;
+//   });
+// }, [rows]);
+
+
+
+
+  // ✅✅ 30-DAY SURCHARGE ACCUMULATOR FOR POSSESSION (separate state)
+ // ✅✅ 30-DAY SURCHARGE ACCUMULATOR FOR POSSESSION (separate state)
+// useEffect(() => {
+//   if (possessionPctEdit <= 0) return;
+//   if (!posDueDate) return;
+
+//   const inst = Number(possessionAmount || 0);
+//   const paid = Number(posPaid || 0);
+//   const balance = Math.max(0, inst - paid);
+
+//   // ✅ First surcharge only when BOTH due date + payment date exist
+//   const daysLate = lateDaysWhenPaid(posDueDate, posPaymentDate);
+
+//   const shouldHaveCycles = cyclesFromLateDays(daysLate);
+//   const applied = Number(posSurchargeCyclesApplied || 0);
+
+//   if (shouldHaveCycles <= applied) return;
+
+//   const cyclesToAdd = shouldHaveCycles - applied;
+
+//   setPosSurchargeBlocks((prev) => {
+//     const blocks = Array.isArray(prev) ? [...prev] : [];
+
+//     for (let i = 1; i <= cyclesToAdd; i++) {
+//       const cycleNo = applied + i;
+//       blocks.push(makeBlock({ cycle: cycleNo, balance }));
+//     }
+
+//     const newTotal = sumBlocks(blocks);
+//     setPosSurchargeLockedAmount(newTotal);
+//     return blocks;
+//   });
+
+//   setPosSurchargeCyclesApplied(shouldHaveCycles);
+//   // eslint-disable-next-line
+// }, [
+//   possessionPctEdit,
+//   possessionAmount,
+//   posDueDate,
+//   posPaid,
+//   posPaymentDate,
+//   posSurchargeCyclesApplied,
+// ]);
+
+
 
   async function downloadLedgerFile(type) {
     if (!contractId) return;
@@ -481,22 +769,11 @@ export default function AdminLedger({ token, user, onLogout }) {
     }
   }
 
-  // ---------- AUTO CALCULATIONS ----------
-  const totalAmount = Number(totalAmountEdit || 0);
-  const downPayment = Number(downPaymentEdit || 0);
-  const months = Number(monthsEdit || 0);
-  const possessionPct = Number(possessionPctEdit || 0);
-
-  const possessionAmount = Math.round((totalAmount * possessionPct) / 100);
-  const monthlyTotal = Math.max(
-    0,
-    totalAmount - downPayment - possessionAmount
-  );
-
   function rebuildInstallments() {
     if (!contract) return;
     if (!months || months <= 0) {
       setMsg("Months missing in contract");
+      
       return;
     }
 
@@ -506,9 +783,7 @@ export default function AdminLedger({ token, user, onLogout }) {
     const base = Math.floor(monthlyTotal / months);
     const remainder = monthlyTotal - base * months;
 
-    const start = contract.startDate
-      ? new Date(contract.startDate)
-      : new Date();
+    const start = contract.startDate ? new Date(contract.startDate) : new Date();
 
     const gen = Array.from({ length: months }).map((_, i) => {
       const srNo = i + 1;
@@ -521,6 +796,23 @@ export default function AdminLedger({ token, user, onLogout }) {
 
       return {
         ...old,
+
+        // ✅ keep surcharge accumulator fields
+        // ✅ base snapshot must survive rebuild
+surchargeLockedBase: Number(old.surchargeLockedBase ?? old.surchargeLockedAmount ?? 0),
+surchargeCyclesBase: Number(old.surchargeCyclesBase ?? old.surchargeCyclesApplied ?? 0),
+
+
+surchargeBalanceBase: Number(
+  old.surchargeBalanceBase ??
+  Math.max(0, Number(old.installmentAmount || inst) - effectivePaid(old))
+),
+
+
+        surchargeLockedAmount: Number(old.surchargeLockedAmount || 0),
+        surchargeCyclesApplied: Number(old.surchargeCyclesApplied || 0),
+        surchargeLockedAt: old.surchargeLockedAt || null,
+
         __key:
           old.__key ||
           (old.id
@@ -569,6 +861,7 @@ export default function AdminLedger({ token, user, onLogout }) {
   }
 
   function addRow() {
+    
     const nextSr = rows.length
       ? Math.max(...rows.map((r) => Number(r.srNo))) + 1
       : 1;
@@ -587,7 +880,19 @@ export default function AdminLedger({ token, user, onLogout }) {
         paymentProof: "",
         instrumentType: "",
         instrumentNo: "",
+        surchargeBalanceBase: 0,
+
         children: [],
+
+        // ✅ surcharge accumulator fields
+        surchargeLockedBase: 0,
+surchargeCyclesBase: 0,
+
+        surchargeLockedAmount: 0,
+        surchargeCyclesApplied: 0,
+        surchargeLockedAt: null,
+        surchargeBlocks: [],
+
       },
     ]);
   }
@@ -715,118 +1020,233 @@ export default function AdminLedger({ token, user, onLogout }) {
     }
   }
 
-  async function saveAll() {
-    setSaving(true);
-    setMsg("");
+  // ✅ upload POSSESSION proof (reuses same endpoint; backend should accept srNo="POSSESSION")
+  async function uploadPossessionProof(file) {
+    if (!file) return;
+
     try {
-      // validate srNo unique
-      const set = new Set();
-      for (const r of rows) {
-        const sr = Number(r.srNo);
-        if (!sr) throw new Error("Each row needs Sr No");
-        if (set.has(sr)) throw new Error("Sr No must be unique");
-        set.add(sr);
+      setMsg("");
 
-        // validate child lineNo unique per parent (optional but good)
-        const childSet = new Set();
-        for (const c of r.children || []) {
-          const ln = Number(c.lineNo);
-          if (!ln) throw new Error(`Child row lineNo missing in SrNo ${sr}`);
-          if (childSet.has(ln))
-            throw new Error(`Child lineNo must be unique in SrNo ${sr}`);
-          childSet.add(ln);
-        }
+      const fd = new FormData();
+      fd.append("file", file);
+      fd.append("srNo", "POSSESSION");
+
+      const res = await client.post(
+        `/api/admin/ledger/${contractId}/upload-proof`,
+        fd,
+        { headers: { "Content-Type": "multipart/form-data" } }
+      );
+
+      const url = res?.data?.url;
+      if (!url) throw new Error("Upload failed (no url returned)");
+
+      setPosPaymentProof(url);
+      setMsg("Possession proof uploaded ✅");
+    } catch (e) {
+      console.error(e);
+      setMsg(e.response?.data?.error || e.message || "Failed to upload proof");
+    }
+  }
+
+
+  async function deleteProofForRow(idx) {
+  try {
+    setMsg("");
+
+    const row = rows[idx];
+    if (!row) return;
+
+    // ✅ prefer rowId (best), fallback srNo
+    const payload = row.id
+      ? { rowId: Number(row.id) }
+      : { srNo: Number(row.srNo) };
+
+    await client.delete(`/api/admin/ledger/${contractId}/delete-proof`, {
+      data: payload,
+    });
+
+    updateRow(idx, { paymentProof: "" });
+    setMsg("Payment proof deleted ✅");
+  } catch (e) {
+    console.error(e);
+    setMsg(e.response?.data?.error || e.message || "Failed to delete proof");
+  }
+}
+
+
+
+async function deletePossessionProof() {
+  try {
+    setMsg("");
+
+    // ⚠️ This will only work if your backend supports POSSESSION proof.
+    // Right now your backend delete-proof expects ledgerrow rowId/srNo (number).
+    await client.delete(`/api/admin/ledger/${contractId}/delete-proof`, {
+      data: { srNo: "POSSESSION" },
+    });
+
+    setPosPaymentProof("");
+    setMsg("Possession proof deleted ✅");
+  } catch (e) {
+    console.error(e);
+    setMsg(e.response?.data?.error || e.message || "Failed to delete proof");
+  }
+}
+
+
+
+  
+
+  async function saveAll() {
+  setSaving(true);
+  setMsg("");
+  try {
+    // validate srNo unique
+    const set = new Set();
+    for (const r of rows) {
+      const sr = Number(r.srNo);
+      if (!sr) throw new Error("Each row needs Sr No");
+      if (set.has(sr)) throw new Error("Sr No must be unique");
+      set.add(sr);
+
+      // validate child lineNo unique per parent
+      const childSet = new Set();
+      for (const c of r.children || []) {
+        const ln = Number(c.lineNo);
+        if (!ln) throw new Error(`Child row lineNo missing in SrNo ${sr}`);
+        if (childSet.has(ln))
+          throw new Error(`Child lineNo must be unique in SrNo ${sr}`);
+        childSet.add(ln);
       }
+    }
 
-      const payloadRows = rows.map((r) => ({
+    // ✅ IMPORTANT: Do NOT send any surcharge fields from frontend
+    const payloadRows = rows.map((r) => {
+      return {
         id: r.id || null,
         srNo: Number(r.srNo),
         description: r.description || "",
         installmentAmount: Number(r.installmentAmount || 0),
-        dueDate: r.dueDate ? r.dueDate : new Date().toISOString().slice(0, 10),
+        dueDate: r.dueDate ? String(r.dueDate).slice(0, 10) : new Date().toISOString().slice(0, 10),
 
-        // parent payment (kept exactly as you already had)
         amountPaid: Number(r.amountPaid || 0),
-        paymentDate: r.paymentDate ? r.paymentDate : null,
+        paymentDate: r.paymentDate ? String(r.paymentDate).slice(0, 10) : null,
 
         paymentProof: r.paymentProof ? r.paymentProof : null,
         instrumentType: r.instrumentType ? r.instrumentType : null,
         instrumentNo: r.instrumentNo ? r.instrumentNo : null,
 
-        // ✅ send children too
         children: (r.children || []).map((c) => ({
           id: c.id || null,
           lineNo: Number(c.lineNo),
           description: c.description || "",
           amountPaid: Number(c.amountPaid || 0),
-          paymentDate: c.paymentDate ? c.paymentDate : null,
+          paymentDate: c.paymentDate ? String(c.paymentDate).slice(0, 10) : null,
+          paymentProof: c.paymentProof ? c.paymentProof : null,
           instrumentType: c.instrumentType ? c.instrumentType : null,
           instrumentNo: c.instrumentNo ? c.instrumentNo : null,
         })),
-      }));
-
-      const payloadContract = {
-        totalAmount: Number(totalAmountEdit || 0),
-        downPayment: Number(downPaymentEdit || 0),
-        possession: Number(possessionPctEdit || 0),
-        months: Number(monthsEdit || 0),
       };
+    });
 
-      const res = await client.put(`/api/admin/ledger/${contractId}`, {
-        rows: payloadRows,
-        contract: payloadContract,
-      });
+    const payloadContract = {
+      totalAmount: Number(totalAmountEdit || 0),
+      downPayment: Number(downPaymentEdit || 0),
+      possession: Number(possessionPctEdit || 0),
+      months: Number(monthsEdit || 0),
 
-      if (res?.data?.contract) {
-        const c = res.data.contract;
-        setContract(c);
-        setTotalAmountEdit(
-          Number(c?.totalAmount || payloadContract.totalAmount)
-        );
-        setDownPaymentEdit(
-          Number(c?.downPayment || payloadContract.downPayment)
-        );
-        setPossessionPctEdit(
-          Number(c?.possession || payloadContract.possession)
-        );
-        setMonthsEdit(Number(c?.months || payloadContract.months));
-      } else {
-        setContract((prev) => ({ ...(prev || {}), ...payloadContract }));
-      }
+      // ✅ possession info (no surcharge fields here too)
+      possessionDueDate: posDueDate ? posDueDate : null,
+      possessionPaid: Number(posPaid || 0),
+      possessionPaymentDate: posPaymentDate ? posPaymentDate : null,
+      possessionInstrumentType: posInstrumentType ? posInstrumentType : null,
+      possessionInstrumentNo: posInstrumentNo ? posInstrumentNo : null,
+      possessionPaymentProof: posPaymentProof ? posPaymentProof : null,
+    };
 
-      setRows(withKeys(res.data.rows || payloadRows));
-      setMsg("Saved successfully ✅");
-    } catch (e) {
-      console.error(e);
-      setMsg(e.response?.data?.error || e.message || "Failed to save");
-    } finally {
-      setSaving(false);
+    const res = await client.put(`/api/admin/ledger/${contractId}`, {
+      rows: payloadRows,
+      contract: payloadContract,
+    });
+
+    // refresh contract + rows from backend (backend is source of truth)
+    if (res?.data?.contract) {
+      const c = res.data.contract;
+      setContract(c);
+
+      setTotalAmountEdit(Number(c?.totalAmount || payloadContract.totalAmount));
+      setDownPaymentEdit(Number(c?.downPayment || payloadContract.downPayment));
+      setPossessionPctEdit(Number(c?.possession || payloadContract.possession));
+      setMonthsEdit(Number(c?.months || payloadContract.months));
+
+      setPosDueDate(
+        c?.possessionDueDate
+          ? String(c.possessionDueDate).slice(0, 10)
+          : (payloadContract.possessionDueDate || "")
+      );
+      setPosPaid(Number(c?.possessionPaid ?? payloadContract.possessionPaid ?? 0));
+      setPosPaymentDate(
+        c?.possessionPaymentDate
+          ? String(c.possessionPaymentDate).slice(0, 10)
+          : (payloadContract.possessionPaymentDate || "")
+      );
+      setPosInstrumentType(c?.possessionInstrumentType ?? payloadContract.possessionInstrumentType ?? "");
+      setPosInstrumentNo(c?.possessionInstrumentNo ?? payloadContract.possessionInstrumentNo ?? "");
+      setPosPaymentProof(c?.possessionPaymentProof ?? payloadContract.possessionPaymentProof ?? "");
+
+      // these bases come from backend (if you keep those fields in DB)
+      setPosSurchargeLockedAmount(Number(c?.possessionSurchargeLockedAmount || 0));
+      setPosSurchargeCyclesApplied(Number(c?.possessionSurchargeCyclesApplied || 0));
+      setPosSurchargeLockedBase(Number(c?.possessionSurchargeLockedAmount || 0));
+      setPosSurchargeCyclesBase(Number(c?.possessionSurchargeCyclesApplied || 0));
+    } else {
+      setContract((prev) => ({ ...(prev || {}), ...payloadContract }));
     }
-  }
 
-  // ---------- TOTALS ----------
+    // ✅ Always set rows from backend
+    setRows(withKeys(res.data.rows || payloadRows));
+    setMsg("Saved successfully ✅");
+  } catch (e) {
+    console.error(e);
+    setMsg(e.response?.data?.error || e.message || "Failed to save");
+  } finally {
+    setSaving(false);
+  }
+}
+
+
+    // ---------- TOTALS ----------
   const totalPayable = Math.round(possessionAmount + monthlyTotal);
 
-  // ✅ totalPaid should include child payments too
-  const totalPaid = rows.reduce((sum, r) => sum + effectivePaid(r), 0);
+  // ✅ Paid includes child + possession paid
+  const totalPaidRows = rows.reduce((sum, r) => sum + effectivePaid(r), 0);
+  const totalPaid = totalPaidRows + Number(posPaid || 0);
 
+  // ✅ Receivable = PURE BALANCE ONLY (NO SURCHARGE)
   const totalReceivable = Math.max(0, totalPayable - totalPaid);
 
-  // ✅ surcharge should use effectivePaid + latest payment date
-  const totalSurcharge = rows.reduce((sum, r) => {
-    const payDate = effectivePaymentDate(r);
-    return (
-      sum +
-      calcSurchargeOnBalance({
-        installmentAmount: r.installmentAmount,
-        amountPaid: effectivePaid(r),
-        dueDate: r.dueDate,
-        paymentDate: payDate,
-      })
-    );
-  }, 0);
+  const totalSurchargeRows = rows.reduce((sum, r) => {
+  const calc = computeRowSurchargeDisplay(r);
+  return sum + Number(calc.surcharge || 0);
+}, 0);
 
-  const totalReceivableWithSurcharge = totalReceivable + totalSurcharge;
+  const posCalcForTotals = computePossessionSurchargeDisplay({
+  possessionAmount,
+  posPaid,
+  posDueDate,
+  posPaymentDate,
+  posSurchargeLockedAmountBase: posSurchargeLockedBase,
+  posSurchargeCyclesBase: posSurchargeCyclesBase,
+});
+
+const totalSurcharge = totalSurchargeRows + Number(posCalcForTotals.surcharge || 0);
+
+
+  // ✅ IMPORTANT: Total Due should NOT include surcharge
+  // (Keep this variable only if you use it somewhere else)
+  const totalReceivableWithSurcharge = totalReceivable;
+
+
 
   const navItems = [
     { key: "dashboard", label: "Dashboard", icon: "▦" },
@@ -841,6 +1261,18 @@ export default function AdminLedger({ token, user, onLogout }) {
   }
 
   const msgTone = msg?.includes("✅") ? "green" : "orange";
+
+  // ---------- POSSESSION computed values ----------
+  const posInst = Number(possessionAmount || 0);
+  const posPaidNum = Number(posPaid || 0);
+  const posBalance = posPaidNum > 0 ? Math.max(0, posInst - posPaidNum) : 0;
+
+  const posLateDays = lateDaysWhenPaid(posDueDate, posPaymentDate);
+
+  const posProofHref = fileUrl(posPaymentProof);
+  const posProofSrc = fileUrl(posPaymentProof);
+  const posSurchargeTotal = sumBlocks(posSurchargeBlocks);
+
 
   return (
     <SidebarLayout
@@ -924,15 +1356,14 @@ export default function AdminLedger({ token, user, onLogout }) {
                   <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
                     <Pill tone="blue">Payable: {fmt(totalPayable)}</Pill>
                     <Pill tone="green">Paid: {fmt(totalPaid)}</Pill>
-                    <Pill tone="orange">
-                      Receivable: {fmt(totalReceivable)}
-                    </Pill>
+                    <Pill tone="orange">Receivable: {fmt(totalReceivable)}</Pill>
                     <Pill tone={totalSurcharge > 0 ? "red" : "purple"}>
                       Surcharge: {fmt(totalSurcharge)}
                     </Pill>
                     <Pill tone="purple">
-                      Total Due: {fmt(totalReceivableWithSurcharge)}
-                    </Pill>
+  Total Due: {fmt(totalReceivable)}
+</Pill>
+
                   </div>
                   <div
                     style={{ color: "#64748b", fontWeight: 700, fontSize: 12 }}
@@ -1119,66 +1550,239 @@ export default function AdminLedger({ token, user, onLogout }) {
                           strategy={verticalListSortingStrategy}
                         >
                           {rowOrder.map((key) => {
-                            // ✅ POSSESSION draggable row
+                            // ✅ POSSESSION draggable row (NOW editable + surcharge)
                             if (key === POS_KEY) {
+                              const posCalc = computePossessionSurchargeDisplay({
+  possessionAmount,
+  posPaid,
+  posDueDate,
+  posPaymentDate,
+  posSurchargeLockedAmountBase: posSurchargeLockedBase,
+  posSurchargeCyclesBase: posSurchargeCyclesBase,
+});
+
+const surcharge = Number(posCalc.surcharge || 0);
+
+const rowTone =
+  surcharge > 0 ? "#fef2f2" : posCalc.daysLate > 0 ? "#fff7ed" : "transparent";
+
+
+
+
                               return (
                                 <SortableRow
                                   key={POS_KEY}
                                   row={{ __key: POS_KEY }}
                                 >
-                                  <td style={td()}>
+                                  <td style={td({ background: rowTone })}>
                                     <span
                                       style={{
                                         color: "#94a3b8",
-                                        fontWeight: 800,
+                                        fontWeight: 900,
                                       }}
                                     >
                                       —
                                     </span>
                                   </td>
 
-                                  <td style={td({ fontWeight: 900 })}>
+                                  <td style={td({ background: rowTone })}>
                                     <Pill tone="purple">
-                                      Possession {possessionPct}%
+                                      POSSESSION {possessionPct}%
                                     </Pill>
                                   </td>
 
-                                  <td style={td({ fontWeight: 900 })}>
-                                    {fmt(possessionAmount)}
-                                  </td>
-
-                                  {Array.from({ length: 9 }).map((_, i) => (
-                                    <td key={i} style={td()}>
-                                      <span
-                                        style={{
-                                          color: "#94a3b8",
-                                          fontWeight: 800,
-                                        }}
-                                      >
-                                        —
-                                      </span>
-                                    </td>
-                                  ))}
-
-                                  <td style={td()}>
-                                    <span
-                                      style={{
-                                        color: "#94a3b8",
-                                        fontWeight: 800,
-                                      }}
-                                    >
-                                      Not applicable
+                                  <td style={td({ background: rowTone })}>
+                                    <span style={{ fontWeight: 900 }}>
+                                      {fmt(possessionAmount)}
                                     </span>
                                   </td>
 
-                                  <td style={td()}>
-                                    <span
+                                  <td style={td({ background: rowTone })}>
+                                    <Input
+                                      type="date"
+                                      value={posDueDate || ""}
+                                      onChange={(e) =>
+                                        setPosDueDate(e.target.value)
+                                      }
+                                    />
+                                  </td>
+
+                                  <td style={td({ background: rowTone })}>
+                                    <Input
+                                      type="number"
+                                      value={posPaid || 0}
+                                      onChange={(e) =>
+                                        setPosPaid(e.target.value)
+                                      }
+                                    />
+                                  </td>
+
+                                  <td style={td({ background: rowTone })}>
+                                    <Input
+                                      type="date"
+                                      value={posPaymentDate || ""}
+                                      onChange={(e) =>
+                                        setPosPaymentDate(e.target.value)
+                                      }
+                                    />
+                                  </td>
+
+                                  <td style={td({ background: rowTone })}>
+                                    <Select
+                                      value={posInstrumentType || ""}
+                                      onChange={(e) =>
+                                        setPosInstrumentType(e.target.value)
+                                      }
+                                    >
+                                      <option value="">Select</option>
+                                      <option value="CASH">CASH</option>
+                                      <option value="CHEQUE">CHEQUE</option>
+                                      <option value="BANK">BANK</option>
+                                      <option value="ONLINE">ONLINE</option>
+                                    </Select>
+                                  </td>
+
+                                  <td style={td({ background: rowTone })}>
+                                    <Input
+                                      value={posInstrumentNo || ""}
+                                      placeholder="Cheque/Txn/Ref"
+                                      onChange={(e) =>
+                                        setPosInstrumentNo(e.target.value)
+                                      }
+                                    />
+                                  </td>
+
+                                  <td
+                                    style={td({
+                                      fontWeight: 900,
+                                      background: rowTone,
+                                    })}
+                                  >
+                                    <Pill
+                                      tone={posBalance > 0 ? "orange" : "green"}
+                                    >
+                                      {fmt(posBalance)}
+                                    </Pill>
+                                  </td>
+
+                                  <td
+  style={td({
+    fontWeight: 900,
+    background: rowTone,
+  })}
+>
+  {surcharge > 0 ? (
+    <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+      <Pill tone={posCalc.previewAdd > 0 ? "orange" : "red"}>
+        {fmt(surcharge)}
+      </Pill>
+
+      {posCalc.previewAdd > 0 && <Pill tone="blue">Not Saved</Pill>}
+    </div>
+  ) : (
+    <span style={{ color: "#94a3b8", fontWeight: 800 }}>—</span>
+  )}
+</td>
+
+
+                                  <td style={td({ background: rowTone })}>
+                                    <div
                                       style={{
-                                        color: "#94a3b8",
-                                        fontWeight: 800,
+                                        display: "flex",
+                                        gap: 8,
+                                        alignItems: "center",
                                       }}
                                     >
-                                      —
+                                      <label
+                                        style={{
+                                          cursor: "pointer",
+                                          padding: "10px 12px",
+                                          borderRadius: 12,
+                                          border: "1px solid #e5e7eb",
+                                          background: "#ffffff",
+                                          fontWeight: 900,
+                                          fontSize: 12,
+                                        }}
+                                      >
+                                        Upload
+                                        <input
+                                          type="file"
+                                          accept="image/*,application/pdf"
+                                          style={{ display: "none" }}
+                                          onChange={(e) => {
+                                            const file = e.target.files?.[0];
+                                            if (file)
+                                              uploadPossessionProof(file);
+                                            e.target.value = "";
+                                          }}
+                                        />
+                                      </label>
+
+                                      {posPaymentProof ? (
+  <>
+    <a
+      href={posProofHref}
+      target="_blank"
+      rel="noreferrer"
+      style={{
+        textDecoration: "none",
+        padding: "10px 12px",
+        borderRadius: 12,
+        border: "1px solid #e5e7eb",
+        background: "#ffffff",
+        fontWeight: 900,
+        fontSize: 12,
+        color: "#0f172a",
+      }}
+    >
+      View
+    </a>
+
+    <DangerButton
+      onClick={deletePossessionProof}
+      style={{ padding: "10px 12px", fontSize: 12 }}
+    >
+      Delete
+    </DangerButton>
+  </>
+) : (
+  <span style={{ fontSize: 12, color: "#64748b", fontWeight: 700 }}>
+    No file
+  </span>
+)}
+
+                                    </div>
+
+                                    {posPaymentProof && (
+                                      <div style={{ marginTop: 8 }}>
+                                        <img
+                                          src={posProofSrc}
+                                          alt="Possession Proof"
+                                          style={{
+                                            width: 130,
+                                            height: 78,
+                                            objectFit: "cover",
+                                            borderRadius: 14,
+                                            border: "1px solid #e5e7eb",
+                                          }}
+                                          onError={(e) => {
+                                            e.currentTarget.style.display =
+                                              "none";
+                                          }}
+                                        />
+                                      </div>
+                                    )}
+                                  </td>
+
+                                  <td style={td({ background: rowTone })}>
+                                    <span
+                                      style={{
+                                        color: "#64748b",
+                                        fontWeight: 800,
+                                        fontSize: 12,
+                                      }}
+                                    >
+                                      Included in totals
                                     </span>
                                   </td>
                                 </SortableRow>
@@ -1197,28 +1801,24 @@ export default function AdminLedger({ token, user, onLogout }) {
                             const paid = effectivePaid(r);
 
                             // ✅ Balance should reflect both
-                            const balance = Math.max(0, inst - paid);
+                            const balance = displayBalanceForRow(r);
 
-                            // ✅ Late days/surcharge should use latest payment date (parent or child)
+
+                            // ✅ Late days uses latest payment date (parent or child)
                             const payDate = effectivePaymentDate(r);
-                            const lDays = lateDays(r.dueDate, payDate);
+                            const calc = computeRowSurchargeDisplay(r);
+const lDays = calc.daysLate;
+const surcharge = calc.surcharge;
 
-                            const surcharge = calcSurchargeOnBalance({
-                              installmentAmount: r.installmentAmount,
-                              amountPaid: paid,
-                              dueDate: r.dueDate,
-                              paymentDate: payDate,
-                            });
 
                             const proofHref = fileUrl(r.paymentProof);
                             const proofSrc = fileUrl(r.paymentProof);
 
                             const rowTone =
-                              surcharge > 0
-                                ? "#fef2f2"
-                                : lDays > 0
-                                ? "#fff7ed"
-                                : "transparent";
+  surcharge > 0 ? "#fef2f2" : lDays > 0 ? "#fff7ed" : "transparent";
+
+
+
 
                             const isExpanded = expandedKeys.has(r.__key);
 
@@ -1284,7 +1884,7 @@ export default function AdminLedger({ token, user, onLogout }) {
                                         })
                                       }
                                     />
-                                    {/* ✅ show child sum + total paid (no behavior change) */}
+                                    {/* ✅ show child sum + total paid */}
                                     {(r.children || []).length > 0 && (
                                       <div
                                         style={{
@@ -1368,17 +1968,17 @@ export default function AdminLedger({ token, user, onLogout }) {
                                     })}
                                   >
                                     {surcharge > 0 ? (
-                                      <Pill tone="red">{fmt(surcharge)}</Pill>
-                                    ) : (
-                                      <span
-                                        style={{
-                                          color: "#94a3b8",
-                                          fontWeight: 800,
-                                        }}
-                                      >
-                                        —
-                                      </span>
-                                    )}
+  <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+    <Pill tone={calc.previewAdd > 0 ? "orange" : "red"}>
+      {fmt(surcharge)}
+    </Pill>
+
+    {calc.previewAdd > 0 && <Pill tone="blue">Not Saved</Pill>}
+  </div>
+) : (
+  <span style={{ color: "#94a3b8", fontWeight: 800 }}>—</span>
+)}
+
                                   </td>
 
                                   <td
@@ -1443,34 +2043,38 @@ export default function AdminLedger({ token, user, onLogout }) {
                                       </label>
 
                                       {r.paymentProof ? (
-                                        <a
-                                          href={proofHref}
-                                          target="_blank"
-                                          rel="noreferrer"
-                                          style={{
-                                            textDecoration: "none",
-                                            padding: "10px 12px",
-                                            borderRadius: 12,
-                                            border: "1px solid #e5e7eb",
-                                            background: "#ffffff",
-                                            fontWeight: 900,
-                                            fontSize: 12,
-                                            color: "#0f172a",
-                                          }}
-                                        >
-                                          View
-                                        </a>
-                                      ) : (
-                                        <span
-                                          style={{
-                                            fontSize: 12,
-                                            color: "#64748b",
-                                            fontWeight: 700,
-                                          }}
-                                        >
-                                          No file
-                                        </span>
-                                      )}
+  <>
+    <a
+      href={proofHref}
+      target="_blank"
+      rel="noreferrer"
+      style={{
+        textDecoration: "none",
+        padding: "10px 12px",
+        borderRadius: 12,
+        border: "1px solid #e5e7eb",
+        background: "#ffffff",
+        fontWeight: 900,
+        fontSize: 12,
+        color: "#0f172a",
+      }}
+    >
+      View
+    </a>
+
+    <DangerButton
+      onClick={() => deleteProofForRow(idx)}
+      style={{ padding: "10px 12px", fontSize: 12 }}
+    >
+      Delete
+    </DangerButton>
+  </>
+) : (
+  <span style={{ fontSize: 12, color: "#64748b", fontWeight: 700 }}>
+    No file
+  </span>
+)}
+
                                     </div>
 
                                     {r.paymentProof && (
@@ -1868,14 +2472,18 @@ export default function AdminLedger({ token, user, onLogout }) {
                         <td style={td({ color: "white" })}></td>
                         <td style={td({ color: "white" })}></td>
                         <td style={td({ fontWeight: 900, color: "white" })}>
-                          {fmt(totalReceivable)}
-                        </td>
-                        <td style={td({ fontWeight: 900, color: "white" })}>
-                          {fmt(totalSurcharge)}
-                        </td>
-                        <td style={td({ fontWeight: 900, color: "white" })}>
-                          {fmt(totalReceivableWithSurcharge)}
-                        </td>
+  {fmt(totalReceivable)}
+</td>
+
+<td style={td({ fontWeight: 900, color: "white" })}>
+  {fmt(totalSurcharge)}
+</td>
+
+<td style={td({ fontWeight: 900, color: "white" })}>
+  —
+</td>
+
+
                         <td style={td({ color: "white" })}></td>
                         <td style={td({ color: "white" })}></td>
                       </tr>

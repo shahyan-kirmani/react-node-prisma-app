@@ -116,7 +116,7 @@ function normalizeClient(raw) {
   };
 }
 
-/* -------------------- CLIENT CARD -------------------- */
+/* -------------------- CLIENT CARD (UPGRADED UI) -------------------- */
 function ClientCard({ c, onEdit, onLedger, onDelete }) {
   const active = (c.status || "Active") === "Active";
 
@@ -129,66 +129,325 @@ function ClientCard({ c, onEdit, onLedger, onDelete }) {
   const monthlyTotal = Math.max(0, total - down - possessionAmount);
   const monthly = months > 0 ? Math.round(monthlyTotal / months) : 0;
 
-  return (
-    <div className="card" style={{ padding: 18 }}>
-      <div style={{ display: "flex", justifyContent: "space-between" }}>
-        <div>
-          <b style={{ fontSize: 16 }}>{c.clientName}</b>
-          <div style={{ color: "#64748b", marginTop: 4 }}>
-            {c.unitNumber} • {c.unitType || "Unit"}
+  const fmt = (n) => `Rs. ${Number(n || 0).toLocaleString()}`;
+
+  /* ===================== INSTALLMENT PROGRESS ===================== */
+  // ✅ Option A (recommended): server sends these
+  const paidInstallments = Number(c.paidInstallments || 0);
+  const totalInstallments =
+    Number(c.totalInstallments || 0) || Number(months || 0);
+
+  // ✅ Option B fallback: server sends paidAmount
+  const paidAmount = Number(c.paidAmount || 0);
+
+  // Prefer count-based progress, else amount-based
+  const progressPct = useMemo(() => {
+    if (totalInstallments > 0) {
+      return Math.round(
+        (Math.max(0, paidInstallments) / totalInstallments) * 100
+      );
+    }
+    if (total > 0) {
+      return Math.round((Math.max(0, paidAmount) / total) * 100);
+    }
+    return 0;
+  }, [paidInstallments, totalInstallments, paidAmount, total]);
+
+  const safePct = Math.max(0, Math.min(100, progressPct));
+
+  // Progress label text
+  const progressText =
+    totalInstallments > 0
+      ? `${paidInstallments}/${totalInstallments} installments`
+      : `${fmt(paidAmount)} paid`;
+
+  /* ===================== SMALL UI HELPERS ===================== */
+  const chip = (text) => (
+    <span
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        padding: "6px 10px",
+        borderRadius: 999,
+        border: "1px solid rgba(148,163,184,.45)",
+        background: "rgba(248,250,252,.75)",
+        color: "#0f172a",
+        fontSize: 12,
+        fontWeight: 800,
+        lineHeight: 1,
+        backdropFilter: "blur(6px)",
+      }}
+    >
+      {text}
+    </span>
+  );
+
+  // ✅ COLORED STAT BOXES
+  const Stat = ({ label, value, tone = "blue" }) => {
+    const tones = {
+      blue: {
+        bg: "linear-gradient(135deg, rgba(37,99,235,.12) 0%, rgba(147,197,253,.18) 100%)",
+        border: "rgba(37,99,235,.20)",
+        dot: "#2563eb",
+      },
+      green: {
+        bg: "linear-gradient(135deg, rgba(34,197,94,.12) 0%, rgba(134,239,172,.20) 100%)",
+        border: "rgba(34,197,94,.20)",
+        dot: "#22c55e",
+      },
+      amber: {
+        bg: "linear-gradient(135deg, rgba(245,158,11,.14) 0%, rgba(253,230,138,.22) 100%)",
+        border: "rgba(245,158,11,.22)",
+        dot: "#f59e0b",
+      },
+      slate: {
+        bg: "linear-gradient(135deg, rgba(15,23,42,.06) 0%, rgba(148,163,184,.18) 100%)",
+        border: "rgba(148,163,184,.30)",
+        dot: "#334155",
+      },
+      rose: {
+        bg: "linear-gradient(135deg, rgba(244,63,94,.10) 0%, rgba(253,164,175,.20) 100%)",
+        border: "rgba(244,63,94,.18)",
+        dot: "#f43f5e",
+      },
+    };
+
+    const t = tones[tone] || tones.blue;
+
+    return (
+      <div
+        style={{
+          padding: "11px 12px",
+          borderRadius: 14,
+          border: `1px solid ${t.border}`,
+          background: t.bg,
+          display: "flex",
+          flexDirection: "column",
+          gap: 4,
+          position: "relative",
+          overflow: "hidden",
+        }}
+      >
+        <div
+          style={{
+            position: "absolute",
+            top: -30,
+            right: -30,
+            width: 90,
+            height: 90,
+            borderRadius: "50%",
+            background:
+              "radial-gradient(circle, rgba(255,255,255,.55) 0%, rgba(255,255,255,0) 70%)",
+            pointerEvents: "none",
+          }}
+        />
+
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <span
+            style={{
+              width: 8,
+              height: 8,
+              borderRadius: 999,
+              background: t.dot,
+              boxShadow: "0 6px 14px rgba(15,23,42,.10)",
+            }}
+          />
+          <div style={{ fontSize: 12, color: "#475569", fontWeight: 900 }}>
+            {label}
           </div>
-          <div style={{ color: "#64748b", marginTop: 4 }}>
-            {c.project || "Avenue 18"}
+        </div>
+
+        <div style={{ fontSize: 15, fontWeight: 900, color: "#0f172a" }}>
+          {value}
+        </div>
+      </div>
+    );
+  };
+
+  return (
+    <div
+      className="card"
+      style={{
+        padding: 18,
+        borderRadius: 18,
+        border: "1px solid rgba(148,163,184,.35)",
+        background:
+          "linear-gradient(135deg, rgba(37,99,235,.08) 0%, rgba(16,185,129,.06) 45%, rgba(255,255,255,1) 100%)",
+        boxShadow: "0 12px 34px rgba(15, 23, 42, 0.08)",
+        transition:
+          "transform .15s ease, box-shadow .15s ease, border-color .15s ease",
+        position: "relative",
+        overflow: "hidden",
+      }}
+      onMouseEnter={(e) => {
+        e.currentTarget.style.transform = "translateY(-2px)";
+        e.currentTarget.style.boxShadow = "0 18px 48px rgba(15, 23, 42, 0.12)";
+        e.currentTarget.style.borderColor = "rgba(59,130,246,.45)";
+      }}
+      onMouseLeave={(e) => {
+        e.currentTarget.style.transform = "translateY(0px)";
+        e.currentTarget.style.boxShadow = "0 12px 34px rgba(15, 23, 42, 0.08)";
+        e.currentTarget.style.borderColor = "rgba(148,163,184,.35)";
+      }}
+    >
+      {/* decorative glow */}
+      <div
+        style={{
+          position: "absolute",
+          top: -120,
+          right: -120,
+          width: 240,
+          height: 240,
+          borderRadius: "50%",
+          background:
+            "radial-gradient(circle, rgba(59,130,246,.25) 0%, rgba(59,130,246,0) 70%)",
+          pointerEvents: "none",
+        }}
+      />
+
+      {/* TOP HEADER */}
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
+        <div style={{ minWidth: 0 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <div
+              style={{
+                width: 40,
+                height: 40,
+                borderRadius: 14,
+                display: "grid",
+                placeItems: "center",
+                background:
+                  "linear-gradient(135deg, #2563eb 0%, #60a5fa 100%)",
+                color: "white",
+                fontWeight: 900,
+                flex: "0 0 auto",
+                boxShadow: "0 10px 20px rgba(37,99,235,.25)",
+              }}
+              title="Client"
+            >
+              {(c.clientName || "?").trim().charAt(0).toUpperCase()}
+            </div>
+
+            <div style={{ minWidth: 0 }}>
+              <div
+                style={{
+                  fontSize: 16,
+                  fontWeight: 900,
+                  color: "#0f172a",
+                  whiteSpace: "nowrap",
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                }}
+                title={c.clientName}
+              >
+                {c.clientName}
+              </div>
+
+              <div
+                style={{
+                  marginTop: 6,
+                  display: "flex",
+                  gap: 8,
+                  flexWrap: "wrap",
+                }}
+              >
+                {chip(`${c.unitNumber} • ${c.unitType || "Unit"}`)}
+                {chip(c.project || "Avenue 18")}
+              </div>
+            </div>
           </div>
         </div>
 
         <span
           style={{
-            padding: "6px 10px",
+            padding: "7px 12px",
             borderRadius: 999,
-            background: active ? "#dcfce7" : "#fee2e2",
+            background: active ? "rgba(34,197,94,.15)" : "rgba(239,68,68,.12)",
             color: active ? "#166534" : "#991b1b",
-            fontWeight: 700,
+            fontWeight: 900,
             fontSize: 12,
             height: "fit-content",
+            border: `1px solid ${
+              active ? "rgba(34,197,94,.25)" : "rgba(239,68,68,.25)"
+            }`,
+            flex: "0 0 auto",
           }}
         >
           {c.status || "Active"}
         </span>
       </div>
 
-      <hr
-        style={{
-          margin: "12px 0",
-          border: "none",
-          borderTop: "1px solid #e5e7eb",
-        }}
-      />
-
-      <div style={{ display: "grid", gap: 6 }}>
-        <div>
-          Total: <b>Rs. {Number(total || 0).toLocaleString()}</b>
+      {/* ✅ INSTALLMENT PROGRESS */}
+      <div style={{ marginTop: 14 }}>
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "space-between",
+            marginBottom: 8,
+          }}
+        >
+          <div style={{ fontSize: 12, fontWeight: 900, color: "#334155" }}>
+            Installment Progress
+          </div>
+          <div style={{ fontSize: 12, fontWeight: 900, color: "#0f172a" }}>
+            {safePct}% • {progressText}
+          </div>
         </div>
 
-        <div>
-          Down Payment: <b>Rs. {Number(down || 0).toLocaleString()}</b>
+        <div
+          style={{
+            width: "100%",
+            height: 12,
+            borderRadius: 999,
+            background: "rgba(99,102,241,.10)",
+            border: "1px solid rgba(148,163,184,.35)",
+            overflow: "hidden",
+          }}
+        >
+          <div
+            style={{
+              width: `${safePct}%`,
+              height: "100%",
+              background:
+                safePct >= 70
+                  ? "linear-gradient(90deg, #22c55e 0%, #86efac 100%)"
+                  : safePct >= 35
+                  ? "linear-gradient(90deg, #2563eb 0%, #93c5fd 100%)"
+                  : "linear-gradient(90deg, #f59e0b 0%, #fde68a 100%)",
+              transition: "width .25s ease",
+            }}
+          />
         </div>
 
-        <div>
-          Possession: <b>{Number(posPct || 0)}%</b>
-        </div>
-
-        <div>
-          Monthly: <b>Rs. {Number(monthly || 0).toLocaleString()}</b>
-        </div>
-
-        <div>
-          Duration: <b>{Number(months || 0)} months</b>
+        <div style={{ marginTop: 8, fontSize: 12, color: "#64748b", fontWeight: 700 }}>
+          More paid installments → bar fills automatically.
         </div>
       </div>
 
+      {/* STATS GRID (COLORED) */}
       <div
-        style={{ display: "flex", gap: 10, marginTop: 14, flexWrap: "wrap" }}
+        style={{
+          marginTop: 14,
+          display: "grid",
+          gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
+          gap: 10,
+        }}
+      >
+        <Stat label="Total" value={fmt(total)} tone="blue" />
+        <Stat label="Monthly" value={fmt(monthly)} tone="green" />
+        <Stat label="Down Payment" value={fmt(down)} tone="amber" />
+        <Stat label="Duration" value={`${months} months`} tone="slate" />
+      </div>
+
+      {/* ACTIONS */}
+      <div
+        style={{
+          display: "flex",
+          gap: 10,
+          marginTop: 14,
+          flexWrap: "wrap",
+          justifyContent: "flex-end",
+        }}
       >
         <button className="btn secondary" onClick={() => onEdit(c)}>
           ✎ Edit
@@ -201,7 +460,11 @@ function ClientCard({ c, onEdit, onLedger, onDelete }) {
         <button
           className="btn secondary"
           onClick={() => onDelete(c)}
-          style={{ borderColor: "#fecaca", color: "#991b1b" }}
+          style={{
+            borderColor: "#fecaca",
+            color: "#991b1b",
+            background: "#fff1f2",
+          }}
           title="Delete client"
         >
           🗑 Delete
@@ -278,7 +541,6 @@ export default function AdminClients({ token, user, onLogout }) {
     setOpen(true);
   }
 
-  // ✅ mapping fix: edit click -> normalized values -> setForm
   function openEdit(rawC) {
     const c = normalizeClient(rawC);
 
@@ -351,10 +613,7 @@ export default function AdminClients({ token, user, onLogout }) {
           password: form.password,
         });
       } else {
-        await client.put(
-          `/api/admin/clients/${editTarget.contractId}`,
-          payload
-        );
+        await client.put(`/api/admin/clients/${editTarget.contractId}`, payload);
       }
 
       setOpen(false);
@@ -366,7 +625,6 @@ export default function AdminClients({ token, user, onLogout }) {
     }
   }
 
-  // ✅ Delete handler (with confirm)
   async function deleteClient(rawC) {
     const c = normalizeClient(rawC);
     const ok = window.confirm(
@@ -389,7 +647,6 @@ export default function AdminClients({ token, user, onLogout }) {
     }
   }
 
-  // optional: delete from inside modal while editing
   async function deleteFromModal() {
     if (!editTarget?.contractId) return;
     await deleteClient(editTarget);
@@ -458,15 +715,16 @@ export default function AdminClients({ token, user, onLogout }) {
             <div
               style={{
                 display: "grid",
-                gridTemplateColumns: "repeat(auto-fit, minmax(320px,1fr))",
+                gridTemplateColumns: "repeat(auto-fit, minmax(360px,1fr))",
                 gap: 18,
+                alignItems: "start",
               }}
             >
               {filtered.map((c) => (
                 <ClientCard
                   key={c.contractId}
                   c={c}
-                  onEdit={openEdit} // ✅ passes c into openEdit, will map into modal
+                  onEdit={openEdit}
                   onLedger={() => nav(`/admin/ledger/${c.contractId}`)}
                   onDelete={deleteClient}
                 />
@@ -478,7 +736,6 @@ export default function AdminClients({ token, user, onLogout }) {
               onClose={() => setOpen(false)}
               title={mode === "create" ? "Add Client" : "Edit Client"}
             >
-              {/* modal message */}
               {msg && (
                 <div
                   style={{
@@ -515,9 +772,7 @@ export default function AdminClients({ token, user, onLogout }) {
                 <Field label="Email" required>
                   <Input
                     value={form.email}
-                    onChange={(e) =>
-                      setForm({ ...form, email: e.target.value })
-                    }
+                    onChange={(e) => setForm({ ...form, email: e.target.value })}
                     placeholder="Enter email"
                   />
                 </Field>
@@ -525,9 +780,7 @@ export default function AdminClients({ token, user, onLogout }) {
                 <Field label="Phone" required>
                   <Input
                     value={form.phone}
-                    onChange={(e) =>
-                      setForm({ ...form, phone: e.target.value })
-                    }
+                    onChange={(e) => setForm({ ...form, phone: e.target.value })}
                     placeholder="Enter phone number"
                   />
                 </Field>
@@ -570,9 +823,7 @@ export default function AdminClients({ token, user, onLogout }) {
                 <Field label="Status">
                   <Select
                     value={form.status}
-                    onChange={(e) =>
-                      setForm({ ...form, status: e.target.value })
-                    }
+                    onChange={(e) => setForm({ ...form, status: e.target.value })}
                   >
                     <option value="Active">Active</option>
                     <option value="Inactive">Inactive</option>
@@ -642,9 +893,7 @@ export default function AdminClients({ token, user, onLogout }) {
                   <Input
                     type="number"
                     value={form.months}
-                    onChange={(e) =>
-                      setForm({ ...form, months: e.target.value })
-                    }
+                    onChange={(e) => setForm({ ...form, months: e.target.value })}
                     placeholder="e.g., 36"
                   />
                 </Field>
@@ -671,7 +920,6 @@ export default function AdminClients({ token, user, onLogout }) {
                   flexWrap: "wrap",
                 }}
               >
-                {/* ✅ Delete button inside modal (only edit mode) */}
                 {mode === "edit" ? (
                   <button
                     className="btn secondary"
@@ -686,18 +934,11 @@ export default function AdminClients({ token, user, onLogout }) {
                 )}
 
                 <div style={{ display: "flex", gap: 10 }}>
-                  <button
-                    className="btn secondary"
-                    onClick={() => setOpen(false)}
-                  >
+                  <button className="btn secondary" onClick={() => setOpen(false)}>
                     Cancel
                   </button>
                   <button className="btn" onClick={submit} disabled={saving}>
-                    {saving
-                      ? "Saving..."
-                      : mode === "create"
-                      ? "Add Client"
-                      : "Save"}
+                    {saving ? "Saving..." : mode === "create" ? "Add Client" : "Save"}
                   </button>
                 </div>
               </div>
